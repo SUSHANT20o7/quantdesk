@@ -80,44 +80,39 @@ def root():
     return {"status": "ok", "message": "QuantDesk API is running"}
 
 
+
 @app.get("/api/quote/{symbol}")
 def get_quote(symbol: str):
-    """
-    Live quote for a symbol.
-    Returns price, change, % change, volume, market cap.
-    Cached in Redis for 60s.
-    """
     symbol = symbol.upper()
     cached = cache_get(f"quote:{symbol}")
     if cached:
         return cached
-
     try:
         ticker = yf.Ticker(symbol)
-        info = ticker.fast_info
-
-        # fast_info is more reliable than .info for price data
-        price       = clean_float(info.get("lastPrice") or info.get("regularMarketPrice"))
-        prev_close  = clean_float(info.get("previousClose") or info.get("regularMarketPreviousClose"))
-        change      = round(price - prev_close, 2) if price and prev_close else None
-        change_pct  = round((change / prev_close) * 100, 2) if change and prev_close else None
-        volume      = int(info.get("lastVolume") or info.get("regularMarketVolume") or 0)
-        market_cap  = clean_float(info.get("marketCap"))
-
+        hist   = ticker.history(period="2d")
+        if hist.empty:
+            raise HTTPException(status_code=404, detail=f"No data for {symbol}")
+        
+        price      = round(float(hist["Close"].iloc[-1]), 2)
+        prev_close = round(float(hist["Close"].iloc[-2]), 2) if len(hist) > 1 else price
+        change     = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
+        
         result = {
-            "symbol":      symbol,
-            "price":       price,
-            "change":      change,
-            "change_pct":  change_pct,
-            "volume":      volume,
-            "market_cap":  market_cap,
-            "timestamp":   datetime.utcnow().isoformat(),
+            "symbol":     symbol,
+            "price":      price,
+            "change":     change,
+            "change_pct": change_pct,
+            "volume":     int(hist["Volume"].iloc[-1]),
+            "market_cap": None,
+            "timestamp":  datetime.utcnow().isoformat(),
         }
         cache_set(f"quote:{symbol}", result, ttl=60)
         return result
-
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch quote for {symbol}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/prices/{symbol}")
