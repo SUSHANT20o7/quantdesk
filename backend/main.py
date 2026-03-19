@@ -1,3 +1,4 @@
+# v2 - Alpha Vantage
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
