@@ -1,6 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
+import os
+import requests as req_session
+ALPHA_KEY = os.getenv("ALPHA_VANTAGE_KEY", "8OGJGTFSCUTGUWX7")
 import pandas as pd
 import numpy as np
 import redis
@@ -81,6 +84,7 @@ def root():
 
 
 
+
 @app.get("/api/quote/{symbol}")
 def get_quote(symbol: str):
     symbol = symbol.upper()
@@ -88,22 +92,23 @@ def get_quote(symbol: str):
     if cached:
         return cached
     try:
-        ticker = yf.Ticker(symbol)
-        hist   = ticker.history(period="2d")
-        if hist.empty:
+        url  = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_KEY}"
+        resp = req_session.get(url, timeout=10)
+        data = resp.json()
+        quote = data.get("Global Quote", {})
+        if not quote:
             raise HTTPException(status_code=404, detail=f"No data for {symbol}")
-        
-        price      = round(float(hist["Close"].iloc[-1]), 2)
-        prev_close = round(float(hist["Close"].iloc[-2]), 2) if len(hist) > 1 else price
-        change     = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
-        
+        price      = round(float(quote["05. price"]), 2)
+        prev_close = round(float(quote["08. previous close"]), 2)
+        change     = round(float(quote["09. change"]), 2)
+        change_pct = round(float(quote["10. change percent"].replace("%", "")), 2)
+        volume     = int(quote["06. volume"])
         result = {
             "symbol":     symbol,
             "price":      price,
             "change":     change,
             "change_pct": change_pct,
-            "volume":     int(hist["Volume"].iloc[-1]),
+            "volume":     volume,
             "market_cap": None,
             "timestamp":  datetime.utcnow().isoformat(),
         }
@@ -113,7 +118,6 @@ def get_quote(symbol: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/api/prices/{symbol}")
 def get_prices(symbol: str, period: str = "1y", interval: str = "1d"):
