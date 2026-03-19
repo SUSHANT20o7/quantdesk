@@ -165,7 +165,6 @@ def get_quote(symbol: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/api/prices/{symbol}")
 def get_prices(symbol: str, period: str = "1y", interval: str = "1d"):
     symbol    = symbol.upper()
@@ -174,23 +173,37 @@ def get_prices(symbol: str, period: str = "1y", interval: str = "1d"):
     if cached:
         return cached
     try:
-        import yfinance as yf
-        df = yf.download(symbol, period=period, interval=interval, progress=False)
-        if df.empty:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://finance.yahoo.com",
+        }
+        url  = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
+        resp = req_session.get(url, headers=headers, timeout=15)
+        data = resp.json()
+        result_data = data.get("chart", {}).get("result", [])
+        if not result_data:
             raise HTTPException(status_code=404, detail=f"No data for {symbol}")
-        df = df.reset_index()
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] if col[1] == '' else col[0] for col in df.columns]
+        chart     = result_data[0]
+        timestamps = chart.get("timestamp", [])
+        ohlcv     = chart.get("indicators", {}).get("quote", [{}])[0]
+        opens     = ohlcv.get("open",   [])
+        highs     = ohlcv.get("high",   [])
+        lows      = ohlcv.get("low",    [])
+        closes    = ohlcv.get("close",  [])
+        volumes   = ohlcv.get("volume", [])
         records = []
-        for _, row in df.iterrows():
-            date_val = row.get("Date") or row.get("Datetime")
+        for i in range(len(timestamps)):
+            if closes[i] is None:
+                continue
+            date = datetime.fromtimestamp(timestamps[i]).strftime("%Y-%m-%d")
             records.append({
-                "date":   str(date_val)[:10] if date_val is not None else None,
-                "open":   clean_float(row.get("Open")),
-                "high":   clean_float(row.get("High")),
-                "low":    clean_float(row.get("Low")),
-                "close":  clean_float(row.get("Close")),
-                "volume": int(row.get("Volume") or 0),
+                "date":   date,
+                "open":   round(float(opens[i]),   2) if opens[i]   else None,
+                "high":   round(float(highs[i]),   2) if highs[i]   else None,
+                "low":    round(float(lows[i]),    2) if lows[i]    else None,
+                "close":  round(float(closes[i]),  2) if closes[i]  else None,
+                "volume": int(volumes[i]) if volumes[i] else 0,
             })
         result = {"symbol": symbol, "period": period, "interval": interval, "data": records}
         cache_set(cache_key, result, ttl=300)
@@ -199,7 +212,6 @@ def get_prices(symbol: str, period: str = "1y", interval: str = "1d"):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/api/info/{symbol}")
 def get_info(symbol: str):
