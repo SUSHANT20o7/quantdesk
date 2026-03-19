@@ -250,11 +250,20 @@ async def price_broadcaster():
         await asyncio.sleep(30)
 
 
+async def keep_alive():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            req_session.get("https://quantdesk-57jj.onrender.com/", timeout=5)
+            print("Keep alive ping")
+        except Exception:
+            pass
+        await asyncio.sleep(600)
+
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(price_broadcaster())
-
-
+    asyncio.create_task(keep_alive())
 @app.websocket("/ws/prices")
 async def websocket_prices(websocket: WebSocket):
     await manager.connect(websocket)
