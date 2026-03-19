@@ -1,25 +1,22 @@
-# v2 - Alpha Vantage
+# v3 - Alpha Vantage
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yfinance as yf
-import os
-import requests as req_session
-ALPHA_KEY = os.getenv("ALPHA_VANTAGE_KEY", "8OGJGTFSCUTGUWX7")
 import pandas as pd
 import numpy as np
 import redis
 import json
 import asyncio
+import os
+import requests as req_session
 from datetime import datetime
-from typing import Optional
 
 from routers.indicators import router as indicators_router
-from routers.backtest import router as backtest_router
-from routers.portfolio import router as portfolio_router
-from routers.options import router as options_router
-from routers.sentiment import router as sentiment_router
+from routers.backtest   import router as backtest_router
+from routers.portfolio  import router as portfolio_router
+from routers.options    import router as options_router
+from routers.sentiment  import router as sentiment_router
 
-
+ALPHA_KEY = os.getenv("ALPHA_VANTAGE_KEY", "8OGJGTFSCUTGUWX7")
 
 app = FastAPI(title="QuantDesk API", version="1.0.0")
 
@@ -31,13 +28,12 @@ app.include_router(sentiment_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Redis client (graceful fallback if not running)
 try:
     cache = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
     cache.ping()
@@ -46,10 +42,8 @@ except Exception:
     REDIS_AVAILABLE = False
     print("Redis not available - running without cache")
 
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 60
 
-
-# ─── Helpers ────────────────────────────────────────────────────────────────
 
 def cache_get(key: str):
     if not REDIS_AVAILABLE:
@@ -71,19 +65,34 @@ def cache_set(key: str, value, ttl: int = CACHE_TTL):
 
 
 def clean_float(val):
-    """Convert numpy types and NaN to Python floats safely."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return None
     return float(val)
 
 
-# ─── Routes ─────────────────────────────────────────────────────────────────
+def fetch_quote_av(symbol: str):
+    """Fetch quote from Alpha Vantage."""
+    url   = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_KEY}"
+    resp  = req_session.get(url, timeout=10)
+    data  = resp.json()
+    print(f"AV response for {symbol}: {data}")
+    quote = data.get("Global Quote", {})
+    if not quote or not quote.get("05. price"):
+        return None
+    return {
+        "symbol":     symbol,
+        "price":      round(float(quote["05. price"]), 2),
+        "change":     round(float(quote["09. change"]), 2),
+        "change_pct": round(float(quote["10. change percent"].replace("%", "")), 2),
+        "volume":     int(quote["06. volume"]),
+        "market_cap": None,
+        "timestamp":  datetime.utcnow().isoformat(),
+    }
+
 
 @app.get("/")
 def root():
     return {"status": "ok", "message": "QuantDesk API is running"}
-
-
 
 
 @app.get("/api/quote/{symbol}")
@@ -93,26 +102,9 @@ def get_quote(symbol: str):
     if cached:
         return cached
     try:
-        url  = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_KEY}"
-        resp = req_session.get(url, timeout=10)
-        data = resp.json()
-        quote = data.get("Global Quote", {})
-        if not quote:
+        result = fetch_quote_av(symbol)
+        if not result:
             raise HTTPException(status_code=404, detail=f"No data for {symbol}")
-        price      = round(float(quote["05. price"]), 2)
-        prev_close = round(float(quote["08. previous close"]), 2)
-        change     = round(float(quote["09. change"]), 2)
-        change_pct = round(float(quote["10. change percent"].replace("%", "")), 2)
-        volume     = int(quote["06. volume"])
-        result = {
-            "symbol":     symbol,
-            "price":      price,
-            "change":     change,
-            "change_pct": change_pct,
-            "volume":     volume,
-            "market_cap": None,
-            "timestamp":  datetime.utcnow().isoformat(),
-        }
         cache_set(f"quote:{symbol}", result, ttl=60)
         return result
     except HTTPException:
@@ -120,32 +112,22 @@ def get_quote(symbol: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/prices/{symbol}")
 def get_prices(symbol: str, period: str = "1y", interval: str = "1d"):
-    """
-    OHLCV history for a symbol.
-    period: 1d | 5d | 1mo | 3mo | 6mo | 1y | 2y | 5y
-    interval: 1m | 5m | 15m | 1h | 1d | 1wk | 1mo
-    Cached for 5 minutes.
-    """
-    symbol = symbol.upper()
+    symbol    = symbol.upper()
     cache_key = f"prices:{symbol}:{period}:{interval}"
-    cached = cache_get(cache_key)
+    cached    = cache_get(cache_key)
     if cached:
         return cached
-
     try:
+        import yfinance as yf
         df = yf.download(symbol, period=period, interval=interval, progress=False)
-
         if df.empty:
-            raise HTTPException(status_code=404, detail=f"No price data found for {symbol}")
-
+            raise HTTPException(status_code=404, detail=f"No data for {symbol}")
         df = df.reset_index()
-
-        # Handle MultiIndex columns from yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] if col[1] == '' else col[0] for col in df.columns]
-
         records = []
         for _, row in df.iterrows():
             date_val = row.get("Date") or row.get("Datetime")
@@ -157,65 +139,54 @@ def get_prices(symbol: str, period: str = "1y", interval: str = "1d"):
                 "close":  clean_float(row.get("Close")),
                 "volume": int(row.get("Volume") or 0),
             })
-
         result = {"symbol": symbol, "period": period, "interval": interval, "data": records}
         cache_set(cache_key, result, ttl=300)
         return result
-
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch prices for {symbol}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/info/{symbol}")
 def get_info(symbol: str):
-    """Company info: name, sector, industry, description, PE, 52w range."""
     symbol = symbol.upper()
     cached = cache_get(f"info:{symbol}")
     if cached:
         return cached
-
     try:
+        import yfinance as yf
         info = yf.Ticker(symbol).info
         result = {
-            "symbol":        symbol,
-            "name":          info.get("longName") or info.get("shortName"),
-            "sector":        info.get("sector"),
-            "industry":      info.get("industry"),
-            "description":   (info.get("longBusinessSummary") or "")[:400],
-            "pe_ratio":      clean_float(info.get("trailingPE")),
-            "eps":           clean_float(info.get("trailingEps")),
-            "dividend_yield":clean_float(info.get("dividendYield")),
-            "week_52_high":  clean_float(info.get("fiftyTwoWeekHigh")),
-            "week_52_low":   clean_float(info.get("fiftyTwoWeekLow")),
-            "avg_volume":    int(info.get("averageVolume") or 0),
+            "symbol":         symbol,
+            "name":           info.get("longName") or info.get("shortName"),
+            "sector":         info.get("sector"),
+            "industry":       info.get("industry"),
+            "description":    (info.get("longBusinessSummary") or "")[:400],
+            "pe_ratio":       clean_float(info.get("trailingPE")),
+            "eps":            clean_float(info.get("trailingEps")),
+            "dividend_yield": clean_float(info.get("dividendYield")),
+            "week_52_high":   clean_float(info.get("fiftyTwoWeekHigh")),
+            "week_52_low":    clean_float(info.get("fiftyTwoWeekLow")),
+            "avg_volume":     int(info.get("averageVolume") or 0),
         }
         cache_set(f"info:{symbol}", result, ttl=3600)
         return result
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/watchlist")
 def get_watchlist(symbols: str = "AAPL,MSFT,NVDA,TSLA,AMZN,META"):
-    """
-    Bulk quotes for a comma-separated list of symbols.
-    Used to populate the sidebar watchlist.
-    """
     symbol_list = [s.strip().upper() for s in symbols.split(",")]
     results = []
     for sym in symbol_list:
         try:
-            quote = get_quote(sym)
-            results.append(quote)
+            results.append(get_quote(sym))
         except Exception:
             results.append({"symbol": sym, "price": None, "change": None, "change_pct": None})
     return results
 
-
-# ─── WebSocket live feed ─────────────────────────────────────────────────────
 
 class ConnectionManager:
     def __init__(self):
@@ -226,7 +197,8 @@ class ConnectionManager:
         self.active.append(ws)
 
     def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
+        if ws in self.active:
+            self.active.remove(ws)
 
     async def broadcast(self, data: dict):
         for ws in self.active.copy():
@@ -246,23 +218,22 @@ async def price_broadcaster():
             prices = {}
             for sym in DEFAULT_SYMBOLS:
                 try:
-                    url   = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={sym}&apikey={ALPHA_KEY}"
-                    resp  = req_session.get(url, timeout=10)
-                    data  = resp.json()
-                    quote = data.get("Global Quote", {})
-                    if quote:
-                        price      = round(float(quote["05. price"]), 2)
-                        prev_close = round(float(quote["08. previous close"]), 2)
-                        change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0
+                    result = fetch_quote_av(sym)
+                    if result:
                         prices[sym] = {
-                            "price":      price,
-                            "change_pct": change_pct,
+                            "price":      result["price"],
+                            "change_pct": result["change_pct"],
                         }
                 except Exception:
                     pass
             if prices:
-                await manager.broadcast({"type": "prices", "data": prices, "ts": datetime.utcnow().isoformat()})
+                await manager.broadcast({
+                    "type": "prices",
+                    "data": prices,
+                    "ts":   datetime.utcnow().isoformat()
+                })
         await asyncio.sleep(30)
+
 
 @app.on_event("startup")
 async def startup():
@@ -274,6 +245,6 @@ async def websocket_prices(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()   # keep-alive ping from client
+            await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
