@@ -241,26 +241,28 @@ DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "SPY"]
 
 
 async def price_broadcaster():
-    """Background task: polls quotes every 5s and broadcasts to all WS clients."""
     while True:
         if manager.active:
             prices = {}
             for sym in DEFAULT_SYMBOLS:
                 try:
-                    ticker = yf.Ticker(sym)
-                    price = clean_float(ticker.fast_info.get("lastPrice"))
-                    prev  = clean_float(ticker.fast_info.get("previousClose"))
-                    if price and prev:
+                    url   = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={sym}&apikey={ALPHA_KEY}"
+                    resp  = req_session.get(url, timeout=10)
+                    data  = resp.json()
+                    quote = data.get("Global Quote", {})
+                    if quote:
+                        price      = round(float(quote["05. price"]), 2)
+                        prev_close = round(float(quote["08. previous close"]), 2)
+                        change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0
                         prices[sym] = {
                             "price":      price,
-                            "change_pct": round((price - prev) / prev * 100, 2),
+                            "change_pct": change_pct,
                         }
                 except Exception:
                     pass
             if prices:
                 await manager.broadcast({"type": "prices", "data": prices, "ts": datetime.utcnow().isoformat()})
-        await asyncio.sleep(5)
-
+        await asyncio.sleep(30)
 
 @app.on_event("startup")
 async def startup():
