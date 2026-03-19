@@ -71,24 +71,39 @@ def clean_float(val):
 
 
 def fetch_quote_av(symbol: str):
-    """Fetch quote from Alpha Vantage."""
-    url   = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_KEY}"
-    resp  = req_session.get(url, timeout=10)
-    data  = resp.json()
-    print(f"AV response for {symbol}: {data}")
-    quote = data.get("Global Quote", {})
-    if not quote or not quote.get("05. price"):
+    """Fetch quote using Yahoo Finance v8 API - no key needed."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=5d"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com",
+        "Origin": "https://finance.yahoo.com",
+    }
+    resp   = req_session.get(url, headers=headers, timeout=10)
+    print(f"Yahoo v8 status for {symbol}: {resp.status_code}")
+    data   = resp.json()
+    result = data.get("chart", {}).get("result", [])
+    if not result:
+        print(f"No result for {symbol}: {data}")
+        return None
+    meta       = result[0].get("meta", {})
+    price      = round(float(meta.get("regularMarketPrice", 0)), 2)
+    prev_close = round(float(meta.get("previousClose", price)), 2)
+    change     = round(price - prev_close, 2)
+    change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
+    volume     = int(meta.get("regularMarketVolume", 0))
+    if price == 0:
         return None
     return {
         "symbol":     symbol,
-        "price":      round(float(quote["05. price"]), 2),
-        "change":     round(float(quote["09. change"]), 2),
-        "change_pct": round(float(quote["10. change percent"].replace("%", "")), 2),
-        "volume":     int(quote["06. volume"]),
+        "price":      price,
+        "change":     change,
+        "change_pct": change_pct,
+        "volume":     volume,
         "market_cap": None,
         "timestamp":  datetime.utcnow().isoformat(),
     }
-
 
 @app.get("/")
 def root():
