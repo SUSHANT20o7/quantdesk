@@ -1,3 +1,4 @@
+# v2 - Yahoo Finance v8
 # backend/routers/indicators.py
 # Technical Indicators — RSI, MACD, Bollinger Bands, EMA, SMA
 # Endpoint: GET /api/indicators/{symbol}?period=1y&interval=1d
@@ -25,16 +26,41 @@ def clean(val):
 
 
 def fetch_ohlcv(symbol: str, period: str, interval: str) -> pd.DataFrame:
-    """Fetch OHLCV from yfinance and return clean DataFrame."""
-    df = yf.download(symbol, period=period, interval=interval, progress=False)
-    if df.empty:
+    """Fetch OHLCV using Yahoo Finance v8 API directly."""
+    import requests
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://finance.yahoo.com",
+    }
+    url  = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
+    resp = requests.get(url, headers=headers, timeout=15)
+    data = resp.json()
+    result_data = data.get("chart", {}).get("result", [])
+    if not result_data:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
-
-    # Flatten MultiIndex columns if present
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
-
-    df = df.reset_index()
+    chart      = result_data[0]
+    timestamps = chart.get("timestamp", [])
+    ohlcv      = chart.get("indicators", {}).get("quote", [{}])[0]
+    opens      = ohlcv.get("open",   [])
+    highs      = ohlcv.get("high",   [])
+    lows       = ohlcv.get("low",    [])
+    closes     = ohlcv.get("close",  [])
+    volumes    = ohlcv.get("volume", [])
+    from datetime import datetime
+    records = []
+    for i in range(len(timestamps)):
+        if closes[i] is None:
+            continue
+        records.append({
+            "date":   datetime.fromtimestamp(timestamps[i]).strftime("%Y-%m-%d"),
+            "open":   round(float(opens[i]),  2) if opens[i]  else None,
+            "high":   round(float(highs[i]),  2) if highs[i]  else None,
+            "low":    round(float(lows[i]),   2) if lows[i]   else None,
+            "close":  round(float(closes[i]), 2) if closes[i] else None,
+            "volume": int(volumes[i]) if volumes[i] else 0,
+        })
+    df = pd.DataFrame(records)
     df.columns = [c.lower() for c in df.columns]
     return df
 
